@@ -331,6 +331,108 @@ def test_service():
     assert result.data == {"_service": {"sdl": textwrap.dedent(sdl).strip()}}
 
 
+def test_query_fields_named_like_federation_resolvers_are_kept():
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def service(self) -> str:
+            return "service"
+
+        @strawberry.field
+        def entities_resolver(self) -> str:
+            return "entities"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        schema = strawberry.federation.Schema(query=Query)
+
+    result = schema.execute_sync("{ service entitiesResolver _service { sdl } }")
+
+    assert not result.errors
+    assert result.data["service"] == "service"
+    assert result.data["entitiesResolver"] == "entities"
+    assert "_service: _Service!" in result.data["_service"]["sdl"]
+
+
+def test_query_can_define_its_own_service_field():
+    @strawberry.type(name="_Service")
+    class CustomService:
+        sdl: str
+
+    @strawberry.type
+    class Query:
+        hello: str
+
+        @strawberry.field(name="_service")
+        def custom_service(self) -> CustomService:
+            return CustomService(sdl="custom sdl")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        schema = strawberry.federation.Schema(query=Query)
+
+    result = schema.execute_sync("{ _service { sdl } }")
+
+    assert not result.errors
+    assert result.data == {"_service": {"sdl": "custom sdl"}}
+
+
+def test_query_can_define_its_own_service_and_entities_fields():
+    @strawberry.federation.type(keys=["id"])
+    class Product:
+        id: strawberry.ID
+
+    @strawberry.type(name="_Service")
+    class CustomService:
+        sdl: str
+
+    @strawberry.type
+    class Query:
+        product: Product
+
+        @strawberry.field(name="_service")
+        def custom_service(self) -> CustomService:
+            return CustomService(sdl="custom sdl")
+
+        @strawberry.field(name="_entities")
+        def custom_entities(self) -> list[Product]:
+            return [Product(id=strawberry.ID("1"))]
+
+    schema = strawberry.federation.Schema(query=Query)
+
+    expected = """
+        schema @link(url: "https://specs.apollo.dev/federation/v2.11", import: ["@key"]) {
+          query: Query
+        }
+
+        type Product @key(fields: "id") {
+          id: ID!
+        }
+
+        type Query {
+          product: Product!
+          _service: _Service!
+          _entities: [Product!]!
+        }
+
+        scalar _Any
+
+        type _Service {
+          sdl: String!
+        }
+    """
+
+    assert str(schema) == textwrap.dedent(expected).strip()
+
+    result = schema.execute_sync("{ _service { sdl } _entities { id } }")
+
+    assert not result.errors
+    assert result.data == {
+        "_service": {"sdl": "custom sdl"},
+        "_entities": [{"id": "1"}],
+    }
+
+
 def test_using_generics():
     T = TypeVar("T")
 

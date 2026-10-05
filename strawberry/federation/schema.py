@@ -15,6 +15,8 @@ from graphql import GraphQLError
 from strawberry.annotation import StrawberryAnnotation
 from strawberry.printer import print_schema
 from strawberry.schema import Schema as BaseSchema
+from strawberry.schema.config import StrawberryConfig
+from strawberry.schema.name_converter import NameConverter
 from strawberry.types.base import (
     StrawberryContainer,
     StrawberryObjectDefinition,
@@ -34,10 +36,10 @@ if TYPE_CHECKING:
 
     from strawberry.extensions import SchemaExtension
     from strawberry.federation.schema_directives import ComposeDirective
-    from strawberry.schema.config import StrawberryConfig
     from strawberry.schema.exception_handlers import ExceptionHandler
     from strawberry.schema_directive import StrawberrySchemaDirective
     from strawberry.types.enum import StrawberryEnumDefinition
+    from strawberry.types.field import StrawberryField
 
 
 FederationAny = NewType("FederationAny", object)
@@ -80,7 +82,11 @@ class Schema(BaseSchema):
         # Convert version string (e.g., "2.5") to version tuple (e.g., (2, 5))
         self.federation_version = parse_version(federation_version)
 
-        query = self._get_federation_query_type(query, mutation, subscription, types)
+        config = config or StrawberryConfig()
+
+        query = self._get_federation_query_type(
+            query, mutation, subscription, types, config.name_converter
+        )
 
         # Add FederationAny to types so it appears in the schema
         types = [*types, FederationAny]
@@ -119,6 +125,7 @@ class Schema(BaseSchema):
         mutation: type[WithStrawberryObjectDefinition] | None,
         subscription: type[WithStrawberryObjectDefinition] | None,
         additional_types: Iterable[type[WithStrawberryObjectDefinition]],
+        name_converter: NameConverter,
     ) -> type:
         """Returns a new query type that includes the _service field.
 
@@ -132,7 +139,8 @@ class Schema(BaseSchema):
             that are part of the federated service.
 
         The _service field is added by default, but the _entities field is only
-        added if the schema contains an entity type.
+        added if the schema contains an entity type. If the query type already
+        defines one of these fields, its own field is used instead.
         """
         import strawberry
         from strawberry.tools.create_type import create_type
@@ -143,11 +151,13 @@ class Schema(BaseSchema):
                 resolver=lambda: print_schema(self),
             )
 
+        # The federation fields use their GraphQL names as Python names too, so
+        # that they don't replace fields of the query type when merged with it
         @strawberry.field(name="_service")
-        def service() -> Service:
+        def _service() -> Service:
             return Service()
 
-        fields = [service]
+        fields: list[StrawberryField] = [_service]
 
         entity_type = _get_entity_type(query, mutation, subscription, additional_types)
 
@@ -156,23 +166,34 @@ class Schema(BaseSchema):
                 entity_type | None  # type: ignore
             ]
 
-            entities_field = strawberry.field(
-                name="_entities", resolver=self.entities_resolver
+            entities_field = cast(
+                "StrawberryField",
+                strawberry.field(name="_entities", resolver=self.entities_resolver),
             )
+            entities_field.python_name = "_entities"
 
             fields.insert(0, entities_field)
 
-        FederationQuery = create_type(name="Query", fields=fields)
-
         if query is None:
-            return FederationQuery
+            return create_type(name="Query", fields=fields)
+
+        query_definition = query.__strawberry_definition__
+        query_field_names = {
+            name_converter.from_field(field) for field in query_definition.fields
+        }
+        fields = [
+            field for field in fields if field.graphql_name not in query_field_names
+        ]
+
+        bases: tuple[type, ...] = (query,)
+
+        if fields:
+            bases = (create_type(name="Query", fields=fields), query)
 
         # Subclassing merges the fields, but the type's description, directives
         # and extend flag have to be passed on, or they'd be lost
-        query_definition = query.__strawberry_definition__
-
         return strawberry.type(
-            type("Query", (FederationQuery, query), {}),
+            type("Query", bases, {}),
             description=query_definition.description,
             directives=query_definition.directives,
             extend=query_definition.extend,

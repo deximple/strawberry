@@ -2,48 +2,47 @@
 release type: patch
 social_messages:
   x: >-
-    {project_name} {version} is out! Federation schemas now keep the
-    description and directives of your Query type, and add a single
-    @composeDirective for each composed directive.
-    https://strawberry.rocks/release/{version}
+    {project_name} {version} is out! Federation schemas no longer drop Query
+    fields named service, and a Query can define its own _service or _entities
+    field. https://strawberry.rocks/release/{version}
   linkedin: >-
-    {project_name} {version} is out. This release fixes two federation schema
-    issues: the description and directives of the root Query type, like
-    @shareable, are no longer dropped, and directives defined with compose=True
-    get a single @composeDirective instead of one for every place they're used.
+    {project_name} {version} is out. This release fixes federation schemas
+    removing Query fields that shared a Python name with Strawberry's internal
+    federation resolvers, like service, and lets a Query define its own
+    _service or _entities field.
 ---
 
-This release fixes two issues with how federation schemas print the root
-`Query` type and composed directives.
+This release fixes how federation schemas add the `_service` and `_entities`
+fields to the `Query` type.
 
-The description and directives of the `Query` type were dropped, because
-`strawberry.federation.Schema` rebuilds that type to add the `_service` and
-`_entities` fields. Directives like `@shareable` and composed custom directives
-on `Query` are now kept, along with the `@link` and `@composeDirective` they
-need:
+Fields of the `Query` type were matched with these fields by their Python name
+instead of their GraphQL name. A `Query` field named `service` was removed from
+the schema, with only a "Query has overridden fields: service" warning:
 
 ```python
-@strawberry.federation.type(shareable=True, description="The root query")
+@strawberry.type
 class Query:
-    hello: str
+    @strawberry.field
+    def service(self) -> str:  # was missing from the schema
+        return "service"
+
+
+schema = strawberry.federation.Schema(query=Query)
 ```
 
-Directives defined with `compose=True` also added one `@composeDirective` to the
-schema for every place they were used, instead of one per directive:
+Fields like this are now kept. A `Query` that defines its own `_service` or
+`_entities` field now uses it instead of the one Strawberry adds. Before, doing
+this with your own `_Service` type failed with a `DuplicatedTypeName` error:
 
 ```python
-@strawberry.federation.schema_directive(
-    locations=[Location.FIELD_DEFINITION], repeatable=True, compose=True
-)
-class Tag:
-    name: str
+@strawberry.type(name="_Service")
+class CustomService:
+    sdl: str
 
 
 @strawberry.type
 class Query:
-    a: str = strawberry.field(directives=[Tag(name="x")])
-    b: str = strawberry.field(directives=[Tag(name="y")])
+    @strawberry.field(name="_service")
+    def custom_service(self) -> CustomService:
+        return CustomService(sdl=load_sdl())
 ```
-
-This schema used to print `@composeDirective(name: "@tag")` twice. It now prints
-it once.
